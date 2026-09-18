@@ -295,7 +295,30 @@ app.post('/api/admin/products',(req,res)=>{
 });
 app.put('/api/admin/products/:id',(req,res)=>{try{if(!q('SELECT id FROM products WHERE id=?',req.params.id))return res.status(404).json({error:'Product not found'});res.json({product:db.transaction(()=>syncProduct(req.params.id,req.body||{}))()})}catch(e){res.status(400).json({error:e.message.includes('UNIQUE')?'Slug/SKU/variant SKU already exists':e.message})}});
 app.delete('/api/admin/products/:id',(req,res)=>{run('UPDATE products SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?',req.params.id);res.json({ok:true})});
-app.post('/api/admin/uploads',multer({storage:multer.diskStorage({destination:path.join(__dirname,'uploads'),filename:(req,file,cb)=>{const ext={ 'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}[file.mimetype];cb(null,crypto.randomUUID()+ext)}}),limits:{files:8,fileSize:5*1024*1024},fileFilter:(req,file,cb)=>cb(null,['image/jpeg','image/png','image/webp'].includes(file.mimetype))}).array('photos',8),(req,res)=>res.json({files:(req.files||[]).map(f=>({name:f.filename,url:'/uploads/'+f.filename}))}));
+const upload=multer({storage:multer.memoryStorage(),limits:{files:8,fileSize:5*1024*1024},fileFilter:(req,file,cb)=>cb(null,true)}).array('photos',8);
+function imageType(buf){
+  if(buf.length>=3&&buf[0]===0xff&&buf[1]===0xd8&&buf[2]===0xff)return {mime:'image/jpeg',ext:'.jpg'};
+  if(buf.length>=8&&buf.slice(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {mime:'image/png',ext:'.png'};
+  if(buf.length>=12&&buf.slice(0,4).toString('ascii')==='RIFF'&&buf.slice(8,12).toString('ascii')==='WEBP')return {mime:'image/webp',ext:'.webp'};
+  return null;
+}
+app.post('/api/admin/uploads',upload,(req,res)=>{
+  if(!req.files?.length)return res.status(400).json({error:'At least one valid image is required'});
+  const files=[];
+  try{
+    for(const f of req.files){
+      const type=imageType(f.buffer);
+      if(!type)throw Object.assign(new Error('Unsupported or malformed image'),{status:400});
+      const name=crypto.randomUUID()+type.ext,pathName=path.join(__dirname,'uploads',name);
+      fs.writeFileSync(pathName,f.buffer,{flag:'wx'});
+      files.push({name,url:'/uploads/'+name});
+    }
+    res.status(201).json({files});
+  }catch(e){
+    for(const f of files)try{fs.unlinkSync(path.join(__dirname,'uploads',f.name))}catch{}
+    res.status(e.status||400).json({error:e.message});
+  }
+});
 app.use('/uploads',express.static(path.join(__dirname,'uploads'),{fallthrough:false,maxAge:'7d',index:false}));
 app.get('/api/admin/inventory',(req,res)=>res.json({inventory:all('SELECT v.id variant_id,p.id product_id,p.name,p.active,v.size,v.color,v.sku,v.stock FROM variants v JOIN products p ON p.id=v.product_id ORDER BY v.stock ASC,p.name ASC')}));
 app.get('/api/admin/orders',(req,res)=>res.json({orders:all('SELECT o.*,u.name customer_name,u.email,a.full_name,a.phone,a.line1,a.line2,a.city,a.state,a.postal_code,a.country FROM orders o JOIN users u ON u.id=o.user_id JOIN addresses a ON a.id=o.address_id ORDER BY o.created_at DESC LIMIT 500').map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))}));
