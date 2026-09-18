@@ -352,7 +352,9 @@ app.patch('/api/admin/orders/:id',(req,res)=>{
   if(status!==o.status&&!transitions[o.status]?.has(status))return res.status(409).json({error:'Invalid order status transition'});
   if(status==='Cancelled'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require a refund workflow before cancellation'});
   if(status==='Returned'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require the return/refund workflow'});
-  run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
+  if(status==='Delivered')run("UPDATE orders SET status=?,delivered_at=CURRENT_TIMESTAMP,return_until=datetime('now','+'||?||' days'),updated_at=CURRENT_TIMESTAMP WHERE id=?",status,RETURN_DAYS,o.id);
+  else run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);
+  res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
 });
 app.get('/api/admin/returns',(req,res)=>res.json({returns:all('SELECT r.*,o.total,u.name customer_name,u.email FROM returns r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC')}));
 app.patch('/api/admin/returns/:id',async(req,res)=>{
