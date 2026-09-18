@@ -358,8 +358,11 @@ app.patch('/api/admin/orders/:id',(req,res)=>{
 });
 app.get('/api/admin/returns',(req,res)=>res.json({returns:all('SELECT r.*,o.total,u.name customer_name,u.email FROM returns r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC')}));
 app.patch('/api/admin/returns/:id',async(req,res)=>{
-  const allowed=['Requested','Approved','Rejected','Received','Refunded'],status=clean(req.body?.status);if(!allowed.includes(status))return res.status(400).json({error:'Invalid return status'});
+  const allowed=['Requested','Approved','Rejected','Received','Refunded'],status=clean(req.body?.status);
+  const transitions={Requested:new Set(['Approved','Rejected']),Approved:new Set(['Received']),Rejected:new Set([]),Received:new Set(['Refunded']),Refunded:new Set([])};
+  if(!allowed.includes(status))return res.status(400).json({error:'Invalid return status'});
   const r=q('SELECT * FROM returns WHERE id=?',req.params.id);if(!r)return res.status(404).json({error:'Return not found'});
+  if(status!==r.status&&!transitions[r.status]?.has(status))return res.status(409).json({error:'Invalid return status transition'});
   try{
     if(status==='Received'&&r.inventory_restored===0){
       db.transaction(()=>{
