@@ -40,7 +40,7 @@ app.post('/api/payments/webhook',express.raw({type:'application/json',limit:'256
   let event;try{event=JSON.parse(req.body.toString('utf8'))}catch{return res.status(400).json({error:'Invalid webhook payload'})}
   try{
     const p=event.payload?.payment?.entity;
-    if(p?.order_id && ['payment.captured','payment.authorized'].includes(event.event)){
+    if(p?.order_id && event.event==='payment.captured'){
       await finalizePaidOrder(p.order_id,p.id,p.signature||null);
     } else if(p?.order_id && ['payment.failed'].includes(event.event)){
       db.prepare("UPDATE payments SET status='failed',updated_at=CURRENT_TIMESTAMP WHERE provider_order_id=? AND status<>'paid'").run(p.order_id);
@@ -55,7 +55,7 @@ app.use(apiLimiter);
 app.use((req,res,next)=>{
   const origin=process.env.CORS_ORIGIN;
   if(origin&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Origin not allowed'});
-  if(req.headers.origin)res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
+  if(req.headers.origin){ if(origin&&req.headers.origin===origin)res.setHeader('Access-Control-Allow-Origin',origin); else if(!origin&&process.env.NODE_ENV!=='production')res.setHeader('Access-Control-Allow-Origin',req.headers.origin); else if(!origin)return res.status(403).json({error:'CORS_ORIGIN is required in production'}); }
   res.setHeader('Vary','Origin');
   res.setHeader('Access-Control-Allow-Credentials','true');
   if(req.method==='OPTIONS'){res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,PATCH,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type');return res.sendStatus(204)}
@@ -117,8 +117,16 @@ function syncProduct(id,body){
   }
   if(body.variants!==undefined){
     if(!validateVariants(body.variants))throw new Error('Invalid variants');
-    run('DELETE FROM variants WHERE product_id=?',id);
-    for(const v of body.variants)run('INSERT INTO variants(product_id,size,color,sku,stock) VALUES(?,?,?,?,?)',id,clean(v.size),clean(v.color),clean(v.sku).slice(0,80)||null,int(v.stock));
+    const existing=all('SELECT id,size,color,sku FROM variants WHERE product_id=?',id);
+    const incoming=new Map(body.variants.map(v=>[clean(v.size)+'\\0'+clean(v.color),v]));
+    for(const old of existing){
+      const key=old.size+'\\0'+old.color;
+      const v=incoming.get(key);
+      if(v){run('UPDATE variants SET sku=?,stock=? WHERE id=?',clean(v.sku).slice(0,80)||null,int(v.stock),old.id);incoming.delete(key)}
+      else if(q('SELECT id FROM order_items WHERE variant_id=? LIMIT 1',old.id))throw new Error('Cannot remove a variant used by an order; disable the product instead');
+      else run('DELETE FROM variants WHERE id=?',old.id);
+    }
+    for(const v of incoming.values())run('INSERT INTO variants(product_id,size,color,sku,stock) VALUES(?,?,?,?,?)',id,clean(v.size),clean(v.color),clean(v.sku).slice(0,80)||null,int(v.stock));
   }
   return productView(id,true);
 }
@@ -293,9 +301,21 @@ app.get('/api/admin/inventory',(req,res)=>res.json({inventory:all('SELECT v.id v
 app.get('/api/admin/orders',(req,res)=>res.json({orders:all('SELECT o.*,u.name customer_name,u.email,a.full_name,a.phone,a.line1,a.line2,a.city,a.state,a.postal_code,a.country FROM orders o JOIN users u ON u.id=o.user_id JOIN addresses a ON a.id=o.address_id ORDER BY o.created_at DESC LIMIT 500').map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))}));
 app.patch('/api/admin/orders/:id',(req,res)=>{
   const allowed=['Pending','Confirmed','Processing','Shipped','Out for delivery','Delivered','Cancelled','Returned'],status=clean(req.body?.status);
+  const transitions={
+    Pending:new Set(['Confirmed','Cancelled']),
+    Confirmed:new Set(['Processing','Cancelled']),
+    Processing:new Set(['Shipped','Cancelled']),
+    Shipped:new Set(['Out for delivery']),
+    'Out for delivery':new Set(['Delivered']),
+    Delivered:new Set(['Returned']),
+    Cancelled:new Set([]),
+    Returned:new Set([])
+  };
   if(!allowed.includes(status))return res.status(400).json({error:'Invalid order status'});
   const o=q('SELECT * FROM orders WHERE id=?',req.params.id);if(!o)return res.status(404).json({error:'Order not found'});
+  if(status!==o.status&&!transitions[o.status]?.has(status))return res.status(409).json({error:'Invalid order status transition'});
   if(status==='Cancelled'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require a refund workflow before cancellation'});
+  if(status==='Returned'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require the return/refund workflow'});
   run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
 });
 app.get('/api/admin/returns',(req,res)=>res.json({returns:all('SELECT r.*,o.total,u.name customer_name,u.email FROM returns r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC')}));
