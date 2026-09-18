@@ -5,7 +5,7 @@ import fs from 'node:fs';
 
 const port=3100+Math.floor(Math.random()*200);
 const dbPath=`./test-${process.pid}.db`;
-const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',CORS_ORIGIN:`http://127.0.0.1:${port}`,JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
+const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',CORS_ORIGIN:`http://127.0.0.1:${port}`,RAZORPAY_WEBHOOK_SECRET:'test-webhook-secret-123456',JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
 let child;
 const base=`http://127.0.0.1:${port}`;
 
@@ -52,7 +52,8 @@ test('admin product CRUD, filtering and stock-safe cart validation',async()=>{
  assert.equal(bad.status,400);
  const good=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants[0].id,quantity:2})});
  assert.equal(good.status,200);
- const tooMuch=await req('/api/cart',{method:'PATCH',headers:{Cookie:uc},body:JSON.stringify({quantity:3})});
+ const cart=await good.json();const itemId=cart.items[0].id;
+ const tooMuch=await req('/api/cart/'+itemId,{method:'PATCH',headers:{Cookie:uc},body:JSON.stringify({quantity:3})});
  assert.equal(tooMuch.status,400);
 });
 
