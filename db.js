@@ -137,6 +137,7 @@ addColumn("ALTER TABLE products ADD COLUMN new_arrival INTEGER NOT NULL DEFAULT 
 addColumn("ALTER TABLE variants ADD COLUMN sku TEXT");
 addColumn("ALTER TABLE payments ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
 addColumn("ALTER TABLE returns ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
+addColumn("ALTER TABLE returns ADD COLUMN inventory_restored INTEGER NOT NULL DEFAULT 0");
 
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_products_active_category ON products(active,category);
