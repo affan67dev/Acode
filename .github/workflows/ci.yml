@@ -1,67 +1,39 @@
-name: CI
-
+name: E-commerce CI
 on:
   push:
+    branches: [main, clothing-ecommerce-rebuild]
   pull_request:
-
+    branches: [main]
 jobs:
-  spell-check:
-    timeout-minutes: 5
-    name: Check spelling
+  verify:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Actions Repository
-        uses: actions/checkout@v6
-
-      - name: Check spelling
-        uses: crate-ci/typos@master
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          config: ./_typos.toml
-
-  quality:
-    timeout-minutes: 5
-    name: Linting and formatting
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Setup Biome
-        uses: biomejs/setup-biome@v2
-
-      - name: Run Biome
-        run: biome ci .
-
-  translation-check:
-    name: Translation Check (On PR Only)
-    timeout-minutes: 5
-    runs-on: ubuntu-latest
-    permissions: 
-      contents: read
-      pull-requests: read
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v6
-      - name: Use Node.js
-        uses: actions/setup-node@v6
-        with:
+          node-version: 20
           cache: npm
-          cache-dependency-path: '**/package-lock.json'
-
-      - name: Detect Changed Files
-        uses: dorny/paths-filter@v4
-        id: file-changes
-        with:
-          list-files: shell
-          filters: |
-            translation:
-              - 'src/lang/*.json'
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Translation Files Check (if changed)
-        if: steps.file-changes.outputs.translation == 'true'
+      - run: npm install
+      - run: node --check server.js && node --check auth.js && node --check db.js
+      - name: Start application
+        env:
+          JWT_SECRET: ci-test-secret-please-use-a-longer-secret-123456789
+          ADMIN_EMAIL: admin@example.com
+          ADMIN_PASSWORD: CI-admin-password-123456
         run: |
-            npm ci --no-audit --no-fund
-            npm run lang check
+          node server.js > server.log 2>&1 &
+          echo $! > server.pid
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:3000/api/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3000/api/health
+      - name: Smoke test authentication
+        env:
+          JWT_SECRET: ci-test-secret-please-use-a-longer-secret-123456789
+          ADMIN_EMAIL: admin@example.com
+          ADMIN_PASSWORD: CI-admin-password-123456
+        run: |
+          curl -fsS -c cookies.txt -H 'Content-Type: application/json' -d '{"name":"CI User","email":"ci-user@example.com","password":"CI-password-123456"}' http://127.0.0.1:3000/api/auth/signup
+          curl -fsS -b cookies.txt http://127.0.0.1:3000/api/auth/me
+          curl -fsS http://127.0.0.1:3000/api/products
