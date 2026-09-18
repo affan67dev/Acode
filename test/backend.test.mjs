@@ -5,7 +5,7 @@ import fs from 'node:fs';
 
 const port=3100+Math.floor(Math.random()*200);
 const dbPath=`./test-${process.pid}.db`;
-const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',CORS_ORIGIN:`http://127.0.0.1:${port}`,RAZORPAY_WEBHOOK_SECRET:'test-webhook-secret-123456',JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
+const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',CORS_ORIGIN:`http://127.0.0.1:${port}`,RAZORPAY_WEBHOOK_SECRET:'test-webhook-secret-123456',RAZORPAY_KEY_ID:'rzp_test_fake',RAZORPAY_KEY_SECRET:'test-razorpay-secret-123456',JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
 let child;
 const base=`http://127.0.0.1:${port}`;
 
