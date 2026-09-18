@@ -166,5 +166,5 @@ app.get('/api/admin/orders',(req,res)=>res.json({orders:all('SELECT o.*,u.name c
 app.patch('/api/admin/orders/:id',(req,res)=>{const allowed=['Pending','Confirmed','Processing','Shipped','Out for delivery','Delivered','Cancelled','Returned'];if(!allowed.includes(req.body.status))return res.status(400).json({error:'Invalid order status'});const o=q('SELECT * FROM orders WHERE id=?',req.params.id);if(!o)return res.status(404).json({error:'Order not found'});run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',req.body.status,o.id);res.json({ok:true})});
 
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Internal server error'})});
-app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
+app.get(/.*/,(req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
 app.listen(PORT,()=>console.log('Clothing store listening on '+PORT));
