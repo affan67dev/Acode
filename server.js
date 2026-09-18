@@ -39,8 +39,13 @@ app.post('/api/payments/webhook',express.raw({type:'application/json',limit:'256
   if(!signature||signature.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(signature)))return res.status(400).json({error:'Invalid webhook signature'});
   let event;try{event=JSON.parse(req.body.toString('utf8'))}catch{return res.status(400).json({error:'Invalid webhook payload'})}
   try{
+    const eventId=clean(req.get('x-razorpay-event-id'));
+    if(!eventId)return res.status(400).json({error:'Missing webhook event id'});
+    const inserted=run('INSERT OR IGNORE INTO webhook_events(event_id,event) VALUES(?,?)',eventId,clean(event.event));
+    if(inserted.changes===0)return res.json({ok:true,deduplicated:true});
     const p=event.payload?.payment?.entity;
     if(p?.order_id && event.event==='payment.captured'){
+      if(p.currency!=='INR'||Number(p.amount)<=0)throw new Error('Invalid payment payload');
       await finalizePaidOrder(p.order_id,p.id,p.signature||null);
     } else if(p?.order_id && ['payment.failed'].includes(event.event)){
       db.prepare("UPDATE payments SET status='failed',updated_at=CURRENT_TIMESTAMP WHERE provider_order_id=? AND status<>'paid'").run(p.order_id);
@@ -241,14 +246,18 @@ app.post('/api/payments/create',async(req,res)=>{
     res.json({orderId,razorpayOrderId:rz.id,amount:c.total,keyId:process.env.RAZORPAY_KEY_ID});
   }catch(e){console.error('payment create',e);res.status(409).json({error:e.message==='Stock changed; refresh cart'?e.message:'Could not create payment order'})}
 });
-app.post('/api/payments/verify',(req,res)=>{
-  if(!process.env.RAZORPAY_KEY_SECRET)return res.status(503).json({error:'Payment verification is not configured'});
+app.post('/api/payments/verify',async(req,res)=>{
+  if(!process.env.RAZORPAY_KEY_SECRET||!razorpay)return res.status(503).json({error:'Payment verification is not configured'});
   const orderId=int(req.body?.orderId),ro=clean(req.body?.razorpay_order_id),rp=clean(req.body?.razorpay_payment_id),sig=clean(req.body?.razorpay_signature);
   const o=q('SELECT * FROM orders WHERE id=? AND user_id=?',orderId,req.user.id);
   if(!o||o.payment_reference!==ro||!ro||!rp||!sig)return res.status(400).json({error:'Invalid payment data'});
   const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET).update(ro+'|'+rp).digest('hex');
   if(!safeEqual(expected,sig)){run("UPDATE orders SET payment_status='Failed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND payment_status='Pending'",o.id);run("UPDATE payments SET status='failed',signature=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",sig,o.id);return res.status(400).json({error:'Payment signature verification failed'})}
-  try{const id=finalizePaidOrder(ro,rp,sig);res.json({ok:true,orderId:id})}catch(e){res.status(409).json({error:e.message})}
+  try{
+    const payment=await razorpay.payments.fetch(rp);
+    if(payment.order_id!==ro||payment.currency!=='INR'||Number(payment.amount)!==Number(o.total)*100||payment.status!=='captured')return res.status(400).json({error:'Payment details do not match the order'});
+    const id=finalizePaidOrder(ro,rp,sig);res.json({ok:true,orderId:id});
+  }catch(e){res.status(409).json({error:e.message==='Insufficient stock'?e.message:'Payment could not be reconciled'})}
 });
 
 app.get('/api/orders',(req,res)=>res.json({orders:all('SELECT o.*,a.full_name,a.phone,a.line1,a.line2,a.city,a.state,a.postal_code,a.country FROM orders o JOIN addresses a ON a.id=o.address_id WHERE o.user_id=? ORDER BY o.created_at DESC LIMIT 100',req.user.id).map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))}));
