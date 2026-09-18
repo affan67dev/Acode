@@ -240,7 +240,7 @@ app.post('/api/payments/create',async(req,res)=>{
   try{
     for(const i of c.items){const v=q('SELECT stock FROM variants WHERE id=?',i.variant_id);if(!v||v.stock<i.quantity)throw new Error('Stock changed; refresh cart')}
     const orderId=db.transaction(()=>{
-      const o=run("INSERT INTO orders(user_id,address_id,status,payment_status,payment_method,subtotal,delivery_charge,discount,total,return_until) VALUES(?,?,?,?,?,?,?,?,?,datetime('now','+'||?||' days'))",req.user.id,a.id,'Pending','Pending','razorpay',c.subtotal,c.delivery,c.discount,c.total,RETURN_DAYS).lastInsertRowid;
+      const o=run("INSERT INTO orders(user_id,address_id,status,payment_status,payment_method,subtotal,delivery_charge,discount,total) VALUES(?,?,?,?,?,?,?,?,?)",req.user.id,a.id,'Pending','Pending','razorpay',c.subtotal,c.delivery,c.discount,c.total).lastInsertRowid;
       for(const i of c.items)run('INSERT INTO order_items(order_id,product_id,variant_id,product_name,size,color,unit_price,quantity) VALUES(?,?,?,?,?,?,?,?)',o,i.product_id,i.variant_id,i.name,i.size,i.color,i.unit_price,i.quantity);
       return o;
     })();
