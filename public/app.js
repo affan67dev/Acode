@@ -13,7 +13,7 @@ function img(url,alt=''){return url?'<img src="'+esc(url)+'" alt="'+esc(alt)+'" 
 function price(p){const n=p.discount_price??p.price;return '<span class="price">'+money(n)+'</span>'+(p.discount_price!=null?'<span class="old">'+money(p.price)+'</span><span class="discount">SALE</span>':'')}
 
 async function card(p){
-  return '<article class="card"><div class="card-media">'+img(p.images?.[0]?.url,p.name)+'<button class="heart" onclick="toggleWish('+p.id+',event)" aria-label="Wishlist">♡</button></div><div class="card-body"><div class="meta">'+esc(p.brand||p.category)+(p.new_arrival?' · NEW':'')+'</div><h3>'+esc(p.name)+'</h3><div>'+price(p)+'</div><div class="card-actions"><button onclick="location.hash="#/product/'+p.id+'">View</button><button class="ghost" onclick="quickAdd('+p.id+')">Quick add</button></div></div></article>'
+  return '<article class="card"><div class="card-media">'+img(p.images?.[0]?.url,p.name)+'<button class="heart" onclick="toggleWish('+p.id+',event)" aria-label="Wishlist">♡</button></div><div class="card-body"><div class="meta">'+esc(p.brand||p.category)+(p.new_arrival?' · NEW':'')+'</div><h3>'+esc(p.name)+'</h3><div>'+price(p)+'</div><div class="card-actions"><button onclick="location.hash='#/product/'+p.id">View</button><button class="ghost" onclick="quickAdd('+p.id+')">Quick add</button></div></div></article>'
 }
 async function renderGrid(products){return (await Promise.all(products.map(card))).join('')}
 
