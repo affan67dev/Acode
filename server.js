@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import Razorpay from 'razorpay';
@@ -14,6 +15,7 @@ import { setAuth, clearAuth, requireAuth, requireAdmin } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+fs.mkdirSync(path.join(__dirname,'uploads'),{recursive:true});
 const PORT = Number(process.env.PORT || 3000);
 const RETURN_DAYS = Number(process.env.RETURN_WINDOW_DAYS || 10);
 
@@ -23,7 +25,7 @@ app.use(cookieParser());
 app.use(morgan('combined'));
 app.use(express.static(path.join(__dirname,'public')));
 
-const upload = multer({ dest: path.join(__dirname,'uploads'), limits:{fileSize:5*1024*1024}, fileFilter:(_,f,cb)=>cb(null,/^image\/(jpeg|png|webp)$/.test(f.mimetype)) });
+const upload = multer({ storage: multer.diskStorage({destination:path.join(__dirname,'uploads'),filename:(req,file,cb)=>cb(null,Date.now()+'-'+crypto.randomUUID()+path.extname(file.originalname).toLowerCase())}), limits:{fileSize:5*1024*1024}, fileFilter:(_,f,cb)=>cb(null,/^image\/(jpeg|png|webp)$/.test(f.mimetype)) });
 const razorpay = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET
   ? new Razorpay({key_id:process.env.RAZORPAY_KEY_ID,key_secret:process.env.RAZORPAY_KEY_SECRET}) : null;
 
