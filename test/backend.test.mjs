@@ -48,9 +48,9 @@ test('admin product CRUD, filtering and stock-safe cart validation',async()=>{
  assert.equal(created.status,201);const product=(await created.json()).product;assert.equal(product.variants.length,2);
  const filtered=await req('/api/products?category=T-Shirts&size=M&maxPrice=1000&limit=1');assert.equal(filtered.status,200);assert.equal((await filtered.json()).products.length,1);
  const user=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})});const uc=cookies(user);
- const bad=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants[1].id,quantity:1})});
+ const bad=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants.find(v=>v.stock===0).id,quantity:1})});
  assert.equal(bad.status,400);
- const good=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants[0].id,quantity:2})});
+ const good=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants.find(v=>v.stock>0).id,quantity:2})});
  assert.equal(good.status,200);
  const cart=await good.json();const itemId=cart.items[0].id;
  const tooMuch=await req('/api/cart/'+itemId,{method:'PATCH',headers:{Cookie:uc},body:JSON.stringify({quantity:3})});
