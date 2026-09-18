@@ -109,8 +109,9 @@ function validateVariants(variants){
   return variants.every(v=>clean(v.size).length>0&&clean(v.size).length<=30&&clean(v.color).length>0&&clean(v.color).length<=50&&Number.isInteger(Number(v.stock))&&Number(v.stock)>=0&&Number(v.stock)<=100000);
 }
 function productPayload(body){
-  const price=money(body.price),discount=body.discount_price===''||body.discount_price==null?null:money(body.discount_price);
-  if(!clean(body.name)||!clean(body.category)||!Number.isFinite(price)||price<0||(discount!==null&&discount>price))throw new Error('Invalid product fields');
+  const rawPrice=Number(body.price),rawDiscount=body.discount_price===''||body.discount_price==null?null:Number(body.discount_price);
+  if(!Number.isFinite(rawPrice)||rawPrice<0||!clean(body.name)||!clean(body.category)||rawDiscount!==null&&(!Number.isFinite(rawDiscount)||rawDiscount<0||rawDiscount>rawPrice))throw new Error('Invalid product fields');
+  const price=money(rawPrice),discount=rawDiscount===null?null:money(rawDiscount);
   return {name:clean(body.name).slice(0,200),slug:clean(body.slug)||slugify(body.name),description:clean(body.description).slice(0,5000),
     category:clean(body.category).slice(0,100),subcategory:clean(body.subcategory).slice(0,100),brand:clean(body.brand).slice(0,100),
     price,discount_price:discount,sku:clean(body.sku).slice(0,80)||null,active:body.active===false?0:1,featured:body.featured?1:0,new_arrival:body.new_arrival===false?0:1,rating:Math.min(5,Math.max(0,Number(body.rating)||0))};
