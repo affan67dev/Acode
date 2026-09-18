@@ -299,11 +299,30 @@ app.patch('/api/admin/orders/:id',(req,res)=>{
   run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
 });
 app.get('/api/admin/returns',(req,res)=>res.json({returns:all('SELECT r.*,o.total,u.name customer_name,u.email FROM returns r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC')}));
-app.patch('/api/admin/returns/:id',(req,res)=>{
+app.patch('/api/admin/returns/:id',async(req,res)=>{
   const allowed=['Requested','Approved','Rejected','Received','Refunded'],status=clean(req.body?.status);if(!allowed.includes(status))return res.status(400).json({error:'Invalid return status'});
   const r=q('SELECT * FROM returns WHERE id=?',req.params.id);if(!r)return res.status(404).json({error:'Return not found'});
-  if(status==='Refunded'&&q("SELECT payment_status FROM orders WHERE id=? AND payment_status='Paid'",r.order_id))return res.status(409).json({error:'Record the external payment-provider refund before marking refunded'});
-  run('UPDATE returns SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,r.id);res.json({return:q('SELECT * FROM returns WHERE id=?',r.id)});
+  try{
+    if(status==='Received'&&r.inventory_restored===0){
+      db.transaction(()=>{
+        for(const i of all('SELECT variant_id,quantity FROM order_items WHERE order_id=?',r.order_id))run('UPDATE variants SET stock=stock+? WHERE id=?',i.quantity,i.variant_id);
+        run('UPDATE returns SET status=?,inventory_restored=1,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,r.id);
+      })();
+    } else if(status==='Refunded'){
+      const o=q('SELECT * FROM orders WHERE id=?',r.order_id);
+      if(!o||o.payment_status!=='Paid')return res.status(409).json({error:'Order is not eligible for a payment refund'});
+      const pay=q("SELECT provider_payment_id FROM payments WHERE order_id=? AND status='paid'",o.id);
+      if(!pay?.provider_payment_id||!razorpay)return res.status(503).json({error:'Razorpay refund credentials are not configured'});
+      const refund=await razorpay.payments.refund(pay.provider_payment_id,{amount:o.total*100});
+      run("UPDATE orders SET payment_status='Refunded',status='Returned',updated_at=CURRENT_TIMESTAMP WHERE id=?",o.id);
+      run("UPDATE payments SET status='refunded',updated_at=CURRENT_TIMESTAMP WHERE order_id=?",o.id);
+      run("UPDATE returns SET status='Refunded',updated_at=CURRENT_TIMESTAMP WHERE id=?",r.id);
+      return res.json({return:q('SELECT * FROM returns WHERE id=?',r.id),refundId:refund.id});
+    } else {
+      run('UPDATE returns SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,r.id);
+    }
+    res.json({return:q('SELECT * FROM returns WHERE id=?',r.id)});
+  }catch(e){console.error('return update',e);res.status(409).json({error:'Return operation failed'})}
 });
 app.get('/api/admin/customers',(req,res)=>res.json({customers:all("SELECT u.id,u.name,u.email,u.created_at,COUNT(o.id) order_count,COALESCE(SUM(CASE WHEN o.payment_status='Paid' THEN o.total ELSE 0 END),0) paid_total FROM users u LEFT JOIN orders o ON o.user_id=u.id WHERE u.role='user' GROUP BY u.id ORDER BY u.created_at DESC")}));
 app.get('/api/admin/customers/:id/orders',(req,res)=>{const u=q("SELECT id,name,email,created_at FROM users WHERE id=? AND role='user'",req.params.id);if(!u)return res.status(404).json({error:'Customer not found'});res.json({customer:u,orders:all('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC',u.id).map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))})});
