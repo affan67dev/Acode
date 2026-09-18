@@ -52,7 +52,10 @@ app.post('/api/payments/webhook',express.raw({type:'application/json',limit:'256
       db.prepare("UPDATE orders SET payment_status='Failed',updated_at=CURRENT_TIMESTAMP WHERE payment_reference=? AND payment_status='Pending'").run(p.order_id);
     }
     res.json({ok:true});
-  }catch(e){console.error('webhook',e);res.status(500).json({error:'Webhook processing failed'})}
+  }catch(e){
+    if(req.get('x-razorpay-event-id'))run('DELETE FROM webhook_events WHERE event_id=?',clean(req.get('x-razorpay-event-id')));
+    console.error('webhook',e);res.status(500).json({error:'Webhook processing failed'})
+  }
 });
 
 app.use(express.json({limit:'1mb'}));
