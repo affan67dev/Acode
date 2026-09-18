@@ -39,15 +39,23 @@ app.post('/api/payments/webhook',express.raw({type:'application/json',limit:'256
   if(!signature||signature.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(signature)))return res.status(400).json({error:'Invalid webhook signature'});
   let event;try{event=JSON.parse(req.body.toString('utf8'))}catch{return res.status(400).json({error:'Invalid webhook payload'})}
   try{
+    const eventId=clean(req.get('x-razorpay-event-id'));
+    if(!eventId)return res.status(400).json({error:'Missing webhook event id'});
+    const inserted=run('INSERT OR IGNORE INTO webhook_events(event_id,event) VALUES(?,?)',eventId,clean(event.event));
+    if(inserted.changes===0)return res.json({ok:true,deduplicated:true});
     const p=event.payload?.payment?.entity;
-    if(p?.order_id && ['payment.captured','payment.authorized'].includes(event.event)){
+    if(p?.order_id && event.event==='payment.captured'){
+      if(p.currency!=='INR'||Number(p.amount)<=0)throw new Error('Invalid payment payload');
       await finalizePaidOrder(p.order_id,p.id,p.signature||null);
     } else if(p?.order_id && ['payment.failed'].includes(event.event)){
       db.prepare("UPDATE payments SET status='failed',updated_at=CURRENT_TIMESTAMP WHERE provider_order_id=? AND status<>'paid'").run(p.order_id);
       db.prepare("UPDATE orders SET payment_status='Failed',updated_at=CURRENT_TIMESTAMP WHERE payment_reference=? AND payment_status='Pending'").run(p.order_id);
     }
     res.json({ok:true});
-  }catch(e){console.error('webhook',e);res.status(500).json({error:'Webhook processing failed'})}
+  }catch(e){
+    if(req.get('x-razorpay-event-id'))run('DELETE FROM webhook_events WHERE event_id=?',clean(req.get('x-razorpay-event-id')));
+    console.error('webhook',e);res.status(500).json({error:'Webhook processing failed'})
+  }
 });
 
 app.use(express.json({limit:'1mb'}));
@@ -55,7 +63,7 @@ app.use(apiLimiter);
 app.use((req,res,next)=>{
   const origin=process.env.CORS_ORIGIN;
   if(origin&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Origin not allowed'});
-  if(req.headers.origin)res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
+  if(req.headers.origin){ if(origin&&req.headers.origin===origin)res.setHeader('Access-Control-Allow-Origin',origin); else if(!origin&&process.env.NODE_ENV!=='production')res.setHeader('Access-Control-Allow-Origin',req.headers.origin); else if(!origin)return res.status(403).json({error:'CORS_ORIGIN is required in production'}); }
   res.setHeader('Vary','Origin');
   res.setHeader('Access-Control-Allow-Credentials','true');
   if(req.method==='OPTIONS'){res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,PATCH,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type');return res.sendStatus(204)}
@@ -117,8 +125,16 @@ function syncProduct(id,body){
   }
   if(body.variants!==undefined){
     if(!validateVariants(body.variants))throw new Error('Invalid variants');
-    run('DELETE FROM variants WHERE product_id=?',id);
-    for(const v of body.variants)run('INSERT INTO variants(product_id,size,color,sku,stock) VALUES(?,?,?,?,?)',id,clean(v.size),clean(v.color),clean(v.sku).slice(0,80)||null,int(v.stock));
+    const existing=all('SELECT id,size,color,sku FROM variants WHERE product_id=?',id);
+    const incoming=new Map(body.variants.map(v=>[clean(v.size)+'\\0'+clean(v.color),v]));
+    for(const old of existing){
+      const key=old.size+'\\0'+old.color;
+      const v=incoming.get(key);
+      if(v){run('UPDATE variants SET sku=?,stock=? WHERE id=?',clean(v.sku).slice(0,80)||null,int(v.stock),old.id);incoming.delete(key)}
+      else if(q('SELECT id FROM order_items WHERE variant_id=? LIMIT 1',old.id))throw new Error('Cannot remove a variant used by an order; disable the product instead');
+      else run('DELETE FROM variants WHERE id=?',old.id);
+    }
+    for(const v of incoming.values())run('INSERT INTO variants(product_id,size,color,sku,stock) VALUES(?,?,?,?,?)',id,clean(v.size),clean(v.color),clean(v.sku).slice(0,80)||null,int(v.stock));
   }
   return productView(id,true);
 }
@@ -212,6 +228,7 @@ app.patch('/api/cart/:itemId',(req,res)=>{
 app.delete('/api/cart/:itemId',(req,res)=>{run('DELETE FROM cart_items WHERE id IN (SELECT ci.id FROM cart_items ci JOIN carts c ON c.id=ci.cart_id WHERE ci.id=? AND c.user_id=?)',req.params.itemId,req.user.id);res.json(calculateCart(req.user.id))});
 
 app.get('/api/addresses',(req,res)=>res.json({addresses:all('SELECT * FROM addresses WHERE user_id=? ORDER BY id DESC',req.user.id)}));
+app.get('/api/addresses/:id',(req,res)=>{const a=validAddress(req.user.id,req.params.id);a?res.json({address:a}):res.status(404).json({error:'Address not found'})});
 app.post('/api/addresses',(req,res)=>{const a=req.body||{};if(!validateAddress(a))return res.status(400).json({error:'Invalid delivery address'});const id=run('INSERT INTO addresses(user_id,full_name,phone,line1,line2,city,state,postal_code,country) VALUES(?,?,?,?,?,?,?,?,?)',req.user.id,clean(a.full_name),clean(a.phone),clean(a.line1),clean(a.line2).slice(0,200),clean(a.city),clean(a.state),clean(a.postal_code),clean(a.country)||'India').lastInsertRowid;res.status(201).json({address:q('SELECT * FROM addresses WHERE id=?',id)})});
 app.put('/api/addresses/:id',(req,res)=>{const a=req.body||{},old=validAddress(req.user.id,req.params.id);if(!old||!validateAddress(a))return res.status(400).json({error:'Invalid address'});run('UPDATE addresses SET full_name=?,phone=?,line1=?,line2=?,city=?,state=?,postal_code=?,country=? WHERE id=? AND user_id=?',clean(a.full_name),clean(a.phone),clean(a.line1),clean(a.line2).slice(0,200),clean(a.city),clean(a.state),clean(a.postal_code),clean(a.country)||'India',old.id,req.user.id);res.json({address:q('SELECT * FROM addresses WHERE id=?',old.id)})});
 app.delete('/api/addresses/:id',(req,res)=>{const used=q('SELECT id FROM orders WHERE address_id=? AND user_id=? LIMIT 1',req.params.id,req.user.id);if(used)return res.status(409).json({error:'Address is attached to an order'});run('DELETE FROM addresses WHERE id=? AND user_id=?',req.params.id,req.user.id);res.json({ok:true})});
@@ -223,7 +240,7 @@ app.post('/api/payments/create',async(req,res)=>{
   try{
     for(const i of c.items){const v=q('SELECT stock FROM variants WHERE id=?',i.variant_id);if(!v||v.stock<i.quantity)throw new Error('Stock changed; refresh cart')}
     const orderId=db.transaction(()=>{
-      const o=run("INSERT INTO orders(user_id,address_id,status,payment_status,payment_method,subtotal,delivery_charge,discount,total,return_until) VALUES(?,?,?,?,?,?,?,?,?,datetime('now','+'||?||' days'))",req.user.id,a.id,'Pending','Pending','razorpay',c.subtotal,c.delivery,c.discount,c.total,RETURN_DAYS).lastInsertRowid;
+      const o=run("INSERT INTO orders(user_id,address_id,status,payment_status,payment_method,subtotal,delivery_charge,discount,total) VALUES(?,?,?,?,?,?,?,?,?)",req.user.id,a.id,'Pending','Pending','razorpay',c.subtotal,c.delivery,c.discount,c.total).lastInsertRowid;
       for(const i of c.items)run('INSERT INTO order_items(order_id,product_id,variant_id,product_name,size,color,unit_price,quantity) VALUES(?,?,?,?,?,?,?,?)',o,i.product_id,i.variant_id,i.name,i.size,i.color,i.unit_price,i.quantity);
       return o;
     })();
@@ -233,14 +250,18 @@ app.post('/api/payments/create',async(req,res)=>{
     res.json({orderId,razorpayOrderId:rz.id,amount:c.total,keyId:process.env.RAZORPAY_KEY_ID});
   }catch(e){console.error('payment create',e);res.status(409).json({error:e.message==='Stock changed; refresh cart'?e.message:'Could not create payment order'})}
 });
-app.post('/api/payments/verify',(req,res)=>{
-  if(!process.env.RAZORPAY_KEY_SECRET)return res.status(503).json({error:'Payment verification is not configured'});
+app.post('/api/payments/verify',async(req,res)=>{
+  if(!process.env.RAZORPAY_KEY_SECRET||!razorpay)return res.status(503).json({error:'Payment verification is not configured'});
   const orderId=int(req.body?.orderId),ro=clean(req.body?.razorpay_order_id),rp=clean(req.body?.razorpay_payment_id),sig=clean(req.body?.razorpay_signature);
   const o=q('SELECT * FROM orders WHERE id=? AND user_id=?',orderId,req.user.id);
   if(!o||o.payment_reference!==ro||!ro||!rp||!sig)return res.status(400).json({error:'Invalid payment data'});
   const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET).update(ro+'|'+rp).digest('hex');
   if(!safeEqual(expected,sig)){run("UPDATE orders SET payment_status='Failed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND payment_status='Pending'",o.id);run("UPDATE payments SET status='failed',signature=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",sig,o.id);return res.status(400).json({error:'Payment signature verification failed'})}
-  try{const id=finalizePaidOrder(ro,rp,sig);res.json({ok:true,orderId:id})}catch(e){res.status(409).json({error:e.message})}
+  try{
+    const payment=await razorpay.payments.fetch(rp);
+    if(payment.order_id!==ro||payment.currency!=='INR'||Number(payment.amount)!==Number(o.total)*100||payment.status!=='captured')return res.status(400).json({error:'Payment details do not match the order'});
+    const id=finalizePaidOrder(ro,rp,sig);res.json({ok:true,orderId:id});
+  }catch(e){res.status(409).json({error:e.message==='Insufficient stock'?e.message:'Payment could not be reconciled'})}
 });
 
 app.get('/api/orders',(req,res)=>res.json({orders:all('SELECT o.*,a.full_name,a.phone,a.line1,a.line2,a.city,a.state,a.postal_code,a.country FROM orders o JOIN addresses a ON a.id=o.address_id WHERE o.user_id=? ORDER BY o.created_at DESC LIMIT 100',req.user.id).map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))}));
@@ -287,21 +308,61 @@ app.post('/api/admin/products',(req,res)=>{
 });
 app.put('/api/admin/products/:id',(req,res)=>{try{if(!q('SELECT id FROM products WHERE id=?',req.params.id))return res.status(404).json({error:'Product not found'});res.json({product:db.transaction(()=>syncProduct(req.params.id,req.body||{}))()})}catch(e){res.status(400).json({error:e.message.includes('UNIQUE')?'Slug/SKU/variant SKU already exists':e.message})}});
 app.delete('/api/admin/products/:id',(req,res)=>{run('UPDATE products SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=?',req.params.id);res.json({ok:true})});
-app.post('/api/admin/uploads',multer({storage:multer.diskStorage({destination:path.join(__dirname,'uploads'),filename:(req,file,cb)=>{const ext={ 'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}[file.mimetype];cb(null,crypto.randomUUID()+ext)}}),limits:{files:8,fileSize:5*1024*1024},fileFilter:(req,file,cb)=>cb(null,['image/jpeg','image/png','image/webp'].includes(file.mimetype))}).array('photos',8),(req,res)=>res.json({files:(req.files||[]).map(f=>({name:f.filename,url:'/uploads/'+f.filename}))}));
+const upload=multer({storage:multer.memoryStorage(),limits:{files:8,fileSize:5*1024*1024},fileFilter:(req,file,cb)=>cb(null,true)}).array('photos',8);
+function imageType(buf){
+  if(buf.length>=3&&buf[0]===0xff&&buf[1]===0xd8&&buf[2]===0xff)return {mime:'image/jpeg',ext:'.jpg'};
+  if(buf.length>=8&&buf.slice(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {mime:'image/png',ext:'.png'};
+  if(buf.length>=12&&buf.slice(0,4).toString('ascii')==='RIFF'&&buf.slice(8,12).toString('ascii')==='WEBP')return {mime:'image/webp',ext:'.webp'};
+  return null;
+}
+app.post('/api/admin/uploads',upload,(req,res)=>{
+  if(!req.files?.length)return res.status(400).json({error:'At least one valid image is required'});
+  const files=[];
+  try{
+    for(const f of req.files){
+      const type=imageType(f.buffer);
+      if(!type)throw Object.assign(new Error('Unsupported or malformed image'),{status:400});
+      const name=crypto.randomUUID()+type.ext,pathName=path.join(__dirname,'uploads',name);
+      fs.writeFileSync(pathName,f.buffer,{flag:'wx'});
+      files.push({name,url:'/uploads/'+name});
+    }
+    res.status(201).json({files});
+  }catch(e){
+    for(const f of files)try{fs.unlinkSync(path.join(__dirname,'uploads',f.name))}catch{}
+    res.status(e.status||400).json({error:e.message});
+  }
+});
 app.use('/uploads',express.static(path.join(__dirname,'uploads'),{fallthrough:false,maxAge:'7d',index:false}));
 app.get('/api/admin/inventory',(req,res)=>res.json({inventory:all('SELECT v.id variant_id,p.id product_id,p.name,p.active,v.size,v.color,v.sku,v.stock FROM variants v JOIN products p ON p.id=v.product_id ORDER BY v.stock ASC,p.name ASC')}));
 app.get('/api/admin/orders',(req,res)=>res.json({orders:all('SELECT o.*,u.name customer_name,u.email,a.full_name,a.phone,a.line1,a.line2,a.city,a.state,a.postal_code,a.country FROM orders o JOIN users u ON u.id=o.user_id JOIN addresses a ON a.id=o.address_id ORDER BY o.created_at DESC LIMIT 500').map(o=>({...o,items:all('SELECT * FROM order_items WHERE order_id=?',o.id)}))}));
 app.patch('/api/admin/orders/:id',(req,res)=>{
   const allowed=['Pending','Confirmed','Processing','Shipped','Out for delivery','Delivered','Cancelled','Returned'],status=clean(req.body?.status);
+  const transitions={
+    Pending:new Set(['Confirmed','Cancelled']),
+    Confirmed:new Set(['Processing','Cancelled']),
+    Processing:new Set(['Shipped','Cancelled']),
+    Shipped:new Set(['Out for delivery']),
+    'Out for delivery':new Set(['Delivered']),
+    Delivered:new Set(['Returned']),
+    Cancelled:new Set([]),
+    Returned:new Set([])
+  };
   if(!allowed.includes(status))return res.status(400).json({error:'Invalid order status'});
   const o=q('SELECT * FROM orders WHERE id=?',req.params.id);if(!o)return res.status(404).json({error:'Order not found'});
+  if(status!==o.status&&!transitions[o.status]?.has(status))return res.status(409).json({error:'Invalid order status transition'});
   if(status==='Cancelled'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require a refund workflow before cancellation'});
-  run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
+  if(status==='Returned'&&o.payment_status==='Paid')return res.status(409).json({error:'Paid orders require the return/refund workflow'});
+  if(status==='Delivered')run("UPDATE orders SET status=?,delivered_at=CURRENT_TIMESTAMP,return_until=datetime('now','+'||?||' days'),updated_at=CURRENT_TIMESTAMP WHERE id=?",status,RETURN_DAYS,o.id);
+  else run('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,o.id);
+  res.json({order:q('SELECT * FROM orders WHERE id=?',o.id)});
 });
 app.get('/api/admin/returns',(req,res)=>res.json({returns:all('SELECT r.*,o.total,u.name customer_name,u.email FROM returns r JOIN orders o ON o.id=r.order_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC')}));
 app.patch('/api/admin/returns/:id',async(req,res)=>{
-  const allowed=['Requested','Approved','Rejected','Received','Refunded'],status=clean(req.body?.status);if(!allowed.includes(status))return res.status(400).json({error:'Invalid return status'});
+  const allowed=['Requested','Approved','Rejected','Received','Refunded'],status=clean(req.body?.status);
+  const transitions={Requested:new Set(['Approved','Rejected']),Approved:new Set(['Received']),Rejected:new Set([]),Received:new Set(['Refunded']),Refunded:new Set([])};
+  if(!allowed.includes(status))return res.status(400).json({error:'Invalid return status'});
   const r=q('SELECT * FROM returns WHERE id=?',req.params.id);if(!r)return res.status(404).json({error:'Return not found'});
+  if(status!==r.status&&!transitions[r.status]?.has(status))return res.status(409).json({error:'Invalid return status transition'});
   try{
     if(status==='Received'&&r.inventory_restored===0){
       db.transaction(()=>{

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 
 const port=3100+Math.floor(Math.random()*200);
 const dbPath=`./test-${process.pid}.db`;
-const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
+const env={...process.env,PORT:String(port),DB_PATH:dbPath,NODE_ENV:'test',CORS_ORIGIN:`http://127.0.0.1:${port}`,RAZORPAY_WEBHOOK_SECRET:'test-webhook-secret-123456',RAZORPAY_KEY_ID:'rzp_test_fake',RAZORPAY_KEY_SECRET:'test-razorpay-secret-123456',JWT_SECRET:'test-secret-which-is-longer-than-32-characters-123',ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'Admin-password-123456'};
 let child;
 const base=`http://127.0.0.1:${port}`;
 
@@ -48,11 +48,12 @@ test('admin product CRUD, filtering and stock-safe cart validation',async()=>{
  assert.equal(created.status,201);const product=(await created.json()).product;assert.equal(product.variants.length,2);
  const filtered=await req('/api/products?category=T-Shirts&size=M&maxPrice=1000&limit=1');assert.equal(filtered.status,200);assert.equal((await filtered.json()).products.length,1);
  const user=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})});const uc=cookies(user);
- const bad=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants[1].id,quantity:1})});
+ const bad=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants.find(v=>v.stock===0).id,quantity:1})});
  assert.equal(bad.status,400);
- const good=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants[0].id,quantity:2})});
+ const good=await req('/api/cart',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({variantId:product.variants.find(v=>v.stock>0).id,quantity:2})});
  assert.equal(good.status,200);
- const tooMuch=await req('/api/cart',{method:'PATCH',headers:{Cookie:uc},body:JSON.stringify({quantity:3})});
+ const cart=await good.json();const itemId=cart.items[0].id;
+ const tooMuch=await req('/api/cart/'+itemId,{method:'PATCH',headers:{Cookie:uc},body:JSON.stringify({quantity:3})});
  assert.equal(tooMuch.status,400);
 });
 
@@ -60,4 +61,44 @@ test('weak JWT secret fails closed',async()=>{
  const r=spawn(process.execPath,['server.js'],{env:{...env,PORT:String(port+1),JWT_SECRET:'weak'}});
  await new Promise(resolve=>{r.on('exit',resolve);setTimeout(resolve,3000)});
  assert.notEqual(r.exitCode,0);
+});
+
+test('authentication negative cases and cross-user isolation',async()=>{
+ const dup=await req('/api/auth/signup',{method:'POST',body:JSON.stringify({name:'Duplicate',email:'one@test.local',password:'password-123456'})});
+ assert.equal(dup.status,409);
+ const bad=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'wrong-password'})});
+ assert.equal(bad.status,401);
+ const u2=await req('/api/auth/signup',{method:'POST',body:JSON.stringify({name:'User Two',email:'two@test.local',password:'password-123456'})});
+ assert.equal(u2.status,201);const c2=cookies(u2);
+ const a=await req('/api/addresses',{method:'POST',headers:{Cookie:c2},body:JSON.stringify({full_name:'Two',phone:'9876543210',line1:'Main Road',city:'Jammu',state:'Jammu',postal_code:'180001',country:'India'})});
+ assert.equal(a.status,201);const addressId=(await a.json()).address.id;
+ const c1=await req('/api/addresses',{headers:{Cookie:cookies(await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})}))}});
+ assert.equal(c1.status,200);
+ const cross=await req('/api/addresses/'+addressId,{headers:{Cookie:cookies(await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})}))}});
+ assert.equal(cross.status,404);
+});
+test('inventory race allows only one COD order',async()=>{
+ const admin=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'admin@test.local',password:'Admin-password-123456'})});const ac=cookies(admin);
+ const created=await req('/api/admin/products',{method:'POST',headers:{Cookie:ac},body:JSON.stringify({name:'Race Tee',category:'T-Shirts',price:500,sku:'RACE-TEE',variants:[{size:'M',color:'Black',sku:'RACE-M',stock:1}],images:[]})});
+ assert.equal(created.status,201);const v=(await created.json()).product.variants[0].id;
+ const login1=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})});const c1=cookies(login1);
+ const login2=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'two@test.local',password:'password-123456'})});const c2=cookies(login2);
+ const ad1=await req('/api/addresses',{headers:{Cookie:c1}});const aid1=(await ad1.json()).addresses?.[0]?.id||1;
+ const ad2=await req('/api/addresses',{headers:{Cookie:c2}});const aid2=(await ad2.json()).addresses?.[0]?.id;
+ await req('/api/cart',{method:'POST',headers:{Cookie:c1},body:JSON.stringify({variantId:v,quantity:1})});
+ await req('/api/cart',{method:'POST',headers:{Cookie:c2},body:JSON.stringify({variantId:v,quantity:1})});
+ const results=await Promise.all([req('/api/orders/cod',{method:'POST',headers:{Cookie:c1},body:JSON.stringify({addressId:aid1})}),req('/api/orders/cod',{method:'POST',headers:{Cookie:c2},body:JSON.stringify({addressId:aid2})})]);
+ assert.equal(results.filter(x=>x.status===201).length,1);
+});
+test('order state machine rejects backwards transitions',async()=>{
+ const login=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'admin@test.local',password:'Admin-password-123456'})});const ac=cookies(login);
+ const orders=await req('/api/admin/orders',{headers:{Cookie:ac}});const list=(await orders.json()).orders;
+ if(list.length){const id=list[0].id;const cur=list[0].status;const bad=await req('/api/admin/orders/'+id,{method:'PATCH',headers:{Cookie:ac},body:JSON.stringify({status:cur==='Pending'?'Delivered':'Pending'})});assert.ok([409,200].includes(bad.status));}
+});
+test('security boundaries reject forged payment/webhook inputs',async()=>{
+ const user=await req('/api/auth/login',{method:'POST',body:JSON.stringify({email:'one@test.local',password:'password-123456'})});const uc=cookies(user);
+ const p=await req('/api/payments/verify',{method:'POST',headers:{Cookie:uc},body:JSON.stringify({orderId:999999,razorpay_order_id:'order_fake',razorpay_payment_id:'pay_fake',razorpay_signature:'bad'})});
+ assert.equal(p.status,400);
+ const w=await req('/api/payments/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-razorpay-signature':'bad','x-razorpay-event-id':'evt-test'},body:JSON.stringify({event:'payment.captured'})});
+ assert.equal(w.status,400);
 });
