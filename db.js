@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS payments (
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS webhook_events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_id TEXT NOT NULL UNIQUE,
+ event TEXT NOT NULL,
+ received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS returns (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  order_id INTEGER NOT NULL REFERENCES orders(id),
@@ -158,6 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_payments_provider_order ON payments(provider_orde
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 CREATE INDEX IF NOT EXISTS idx_returns_user ON returns(user_id);
 CREATE INDEX IF NOT EXISTS idx_returns_status ON returns(status);
+CREATE INDEX IF NOT EXISTS idx_webhook_events_received ON webhook_events(received_at);
 `);
 
 export default db;
