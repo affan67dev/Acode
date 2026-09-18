@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS orders (
  discount INTEGER NOT NULL DEFAULT 0 CHECK(discount >= 0),
  total INTEGER NOT NULL CHECK(total = subtotal + delivery_charge - discount),
  return_until TEXT,
+ delivered_at TEXT,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -144,6 +145,7 @@ addColumn("ALTER TABLE variants ADD COLUMN sku TEXT");
 addColumn("ALTER TABLE payments ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
 addColumn("ALTER TABLE returns ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
 addColumn("ALTER TABLE returns ADD COLUMN inventory_restored INTEGER NOT NULL DEFAULT 0");
+addColumn("ALTER TABLE orders ADD COLUMN delivered_at TEXT");
 
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_products_active_category ON products(active,category);
